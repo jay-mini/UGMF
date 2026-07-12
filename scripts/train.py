@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objective",
         type=str,
-        default="fm",
+        default="ddpm",
         choices=["ddpm", "fm"],
         help="Training objective.",
     )
@@ -322,7 +322,40 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+
+    args = parse_args()
+    set_seed(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dataset, in_channels, image_size, num_classes = build_dataset(
+        dataset_name=args.dataset,
+        data_dir=args.data_dir,
+    )
+
+    train_loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
+    )
+
+    model = SimpleUNet(
+        in_channels=in_channels,
+        out_channels=in_channels,
+        base_channels=args.base_channels,
+        time_dim=args.time_dim,
+        num_classes=num_classes if args.class_cond else None,
+    )
+
+    objective = build_objective(args)
+
+    
+
+
 
 
 

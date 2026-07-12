@@ -94,6 +94,8 @@ class BaseTrainer:
             for raw_batch in pbar:
                 batch = self._prepare_batch(raw_batch)
 
+                self.optimizer.zero_grad(set_to_none=True)
+
                 with autocast(
                     enabled=self.use_amp,
                     dtype=self.amp_dtype,
@@ -103,8 +105,6 @@ class BaseTrainer:
                         batch=batch,
                     )
                     loss = loss_output.loss
-
-                self.optimizer.zero_grad(set_to_none=True)
 
                 if self.scaler.is_enabled():
                     self.scaler.scale(loss).backward()

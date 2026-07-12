@@ -417,10 +417,25 @@ python scripts/distill.py --config configs/experiment/consistency_distill.yaml
 
 | Date | Progress | Notes |
 | --- | --- | --- |
-| YYYY-MM-DD | Created project structure | Initial unified generative model framework |
-| YYYY-MM-DD | Added README.md | Recorded project goals and roadmap |
+| 2026-07-11 | Created project structure | Initial unified generative model framework |
+| 2026-07-11 | Added README.md | Recorded project goals and roadmap |
 | YYYY-MM-DD |  |  |
 | YYYY-MM-DD |  |  |
+
+
+| Component | Status | Notes |
+|---|---|---|
+| Simple U-Net | Implemented | Forward pass available |
+| DDPM objective | Partial | Training objective implemented |
+| DDPM ancestral sampler | Partial | Requires correctness fixes |
+| Flow Matching objective | Partial | Time-range sampling requires fix |
+| Euler ODE sampler | Partial | Requires numerical tests |
+| Base trainer | Partial | AMP/checkpoint available; EMA missing |
+| DDIM sampler | Not implemented | Planned for Day 5 |
+| EMA | Not implemented | Planned for Day 4 |
+| YAML configuration | Not implemented | Planned for Day 7 |
+| Consistency model | Placeholder | Out of current scope |
+| DiT | Placeholder | Out of current scope |
 
 ---
 
