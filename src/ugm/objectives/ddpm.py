@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .base import BaseObjective, LossOutput
+from ugm.utils.tensor import extract
 
 class DDPMobjective(BaseObjective):
     """
@@ -35,9 +36,52 @@ class DDPMobjective(BaseObjective):
         alphas = 1.0 - betas
         alpha_bars = torch.cumprod(alphas, dim=0)
 
+        alpha_bars_prev = torch.cat(
+            [torch.ones(1, dtype=alpha_bars.dtype), alpha_bars[:-1]], dim=0,
+        )
+
+        posterior_variance = (
+            betas * (1.0 - alpha_bars_prev) / (1.0 - alpha_bars)
+        )
+        poster_variance = torch.clamp(posterior_variance, min=1e-20)
+
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", alphas)
         self.register_buffer("alpha_bars", alpha_bars)
+        self.register_buffer("sqrt_alpha_bars", torch.sqrt(alpha_bars))
+        self.register_buffer("sqrt_one_minus_alpha_bars", torch.sqrt(1.0 - alpha_bars))
+        self.register_buffer("posterior_variance", posterior_variance)
+        self.register_buffer("alpha_bars_prev", alpha_bars_prev)
+
+
+    def q_sample(self, x0: torch.Tensor, timesteps: torch.Tensor, noise: torch.Tensor | None = None) -> torch.Tensor:
+        if noise is None:
+            noise = torch.randn_like(x0)
+
+        if noise.shape != x0.shape:
+            raise ValueError(
+                f"Noise shape {noise.shape} must match x0 shape {x0.shape}"
+            )
+        
+        sqrt_alpha_bar_t = extract(self.sqrt_alpha_bars, timesteps, x0.shape)
+        sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alpha_bars, timesteps, x0.shape)
+
+        return (sqrt_alpha_bar_t * x0 + sqrt_one_minus_alpha_bar_t * noise)
+    
+
+    def predict_x0_from_noise(self, xt: torch.Tensor, timesteps: torch.Tensor, noise_pred: torch.Tensor) -> torch.Tensor:
+        sqrt_alpha_bar_t = extract(self.sqrt_alpha_bars, timesteps, xt.shape)
+        sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alpha_bars, timesteps, xt.shape)
+
+        return (
+            xt - sqrt_one_minus_alpha_bar_t * noise_pred
+        ) / sqrt_alpha_bar_t.clamp_min(1e-12)
+    
+
+    def normalize_timesteps(self, timesteps: torch.Tensor) -> torch.Tensor:
+        denominator = max(self.num_timesteps - 1, 1)
+        return timesteps.float() / denominator
+
 
     def compute_loss(self, model: nn.Module, batch: dict[str, torch.Tensor]) -> LossOutput:
         x0 = batch["x"]  # shape: (B, C, H, W)
@@ -46,22 +90,19 @@ class DDPMobjective(BaseObjective):
         batch_size = x0.shape[0]
         device = x0.device
 
-        t_int = torch.randint(
+        timesteps = torch.randint(
             low=0,
             high=self.num_timesteps,
             size=(batch_size,),
             device=device,
+            dtype=torch.long
         )
 
         noise = torch.randn_like(x0)
-
-        alpha_bar_t = self.alpha_bars[t_int]
-        alpha_bar_t = self._expand_to_data(alpha_bar_t, x0)
-
-        xt = alpha_bar_t.sqrt() * x0 + (1 - alpha_bar_t).sqrt() * noise
+        xt = self.q_sample(x0, timesteps, noise)
 
         # Normalize t to [0, 1]
-        t = t_int.float() / (self.num_timesteps - 1)
+        t = self.normalize_timesteps(timesteps)
 
         pred = model(xt, t, cond=cond)
 
@@ -81,7 +122,7 @@ class DDPMobjective(BaseObjective):
                 "loss_ddpm": loss.detach(),
             },
             aux={
-                "t_int": t_int.detach(),
+                "t_int": timesteps.detach(),
                 "t": t.detach(),
             },
             )

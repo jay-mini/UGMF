@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from ugm.utils.tensor import extract
 
 class DDPMAncestralSampler:
     """
@@ -12,6 +13,8 @@ class DDPMAncestralSampler:
         X_T ~ N(0, I)
 
         p_{theta}(x_{t-1} | x_t) = N(mu_{theta}(x_t, t), beta_tilde_t I)
+
+        x_t -> x_{t-1} = mu_{theta}(x_t, t) + sqrt(beta_tilde_t) * z, z ~ N(0, I)
 
     For epsilon-prediction models:
 
@@ -28,8 +31,90 @@ class DDPMAncestralSampler:
         
         self.clip_x0 = clip_x0
 
-    @torch.no_grad()
+    def p_sample(
+        self,
+        model: nn.Module,
+        objective: nn.Module,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        cond: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Perform one reverse step:
+            x_t -> x_{t-1}
 
+        Parameters
+        ----------
+        model:
+            Noise-prediction or x0-prediction model.
+
+        objective:
+            A DDPMObjective instance that stores betas, alpha_bars.
+
+        xt:
+            Current sample at timestep t.
+
+        timesteps:
+            Integer tensor of shape [B] indicating the current timestep for each sample.
+
+        cond:
+            Optional class labels or other conditioning.
+
+        Returns
+        -------
+        x_prev:
+            Sample at timestep t-1.
+        """
+
+        model_time = objective.normalize_timesteps(timesteps)
+
+        pred = model(xt, model_time, cond=cond,)
+
+        beta_t = extract(objective.betas, timesteps, xt.shape)
+        alpha_t = extract(objective.alphas, timesteps, xt.shape)
+        alpha_bar_t = extract(objective.alpha_bars, timesteps, xt.shape)
+        posterior_variance = extract(objective.posterior_variance, timesteps, xt.shape)
+
+        if objective.prediction_type == "epsilon":
+            eps_pred = pred
+            x0_pred = (
+                xt - torch.sqrt(1.0 - alpha_bar_t) * eps_pred
+            ) / torch.sqrt(alpha_bar_t).clamp_min(1e-12)
+
+        elif objective.prediction_type == "x0":
+            x0_pred = pred
+            eps_pred = (
+                xt - torch.sqrt(alpha_bar_t) * x0_pred
+            ) / torch.sqrt(1.0 - alpha_bar_t).clamp_min(1e-12)
+        else:
+            raise ValueError(
+                f"Unsupported prediction_type: {objective.prediction_type}"
+            )
+        
+        if self.clip_x0:
+            x0_pred = x0_pred.clamp(-1.0, 1.0)
+        
+        poseterior_mean = (
+            1.0 / torch.sqrt(alpha_t)
+        ) * (
+            xt - beta_t / torch.sqrt(1.0 - alpha_bar_t).clamp_min(1e-12) * eps_pred
+        )
+
+        noise = torch.randn_like(xt)
+
+        nonzero_mask = (
+            timesteps != 0
+        ).float()  # No noise when t == 0
+
+        nonzero_mask = nonzero_mask.reshape(
+            xt.shape[0], *((1,) * (len(xt.shape) - 1))
+        )
+
+        x_prev = poseterior_mean + nonzero_mask * torch.sqrt(posterior_variance) * noise
+
+        return x_prev
+
+    @torch.no_grad()
     def sample(
         self,
         model: nn.Module,
@@ -64,88 +149,26 @@ class DDPMAncestralSampler:
 
         device = torch.device(device)
         model.eval()
+        objective.to(device)
 
-        if not hasattr(objective, "num_timesteps"):
-            raise ValueError("objective mus be a DDPMObjective-like object")
-        
-        num_timesteps = int(objective.num_timesteps)
-
-        betas = objective.betas.to(device)
-        alphas = objective.alphas.to(device)
-        alpha_bar = objective.alpha_bar.to(device)
-
-        x = torch.randn(shape, device=device)
+        x = torch.randn(shape, device=device, )
 
         batch_size = shape[0]
 
-        for t_index in reversed(range(num_timesteps)):
-            t_int = torch.full(
-                size=(batch_size, ),
-                fill_value=t_index,
-                device=device,
+        for step in reversed(range(objective.num_timesteps)):
+            t = torch.full(
+                (batch_size,),
+                fill_value=step,
                 dtype=torch.long,
+                device=device,
             )
+            x = self.p_sample(model, objective, x, t, cond=cond)
 
-            t = t_int.float() / float(num_timesteps - 1)
-
-            beta_t = betas[t_int]
-            alpha_t = alphas[t_int]
-            alpha_bar_t = alpha_bar[t_int]
-
-            beta_t_view = self._expand_to_data(beta_t, x)
-            alpha_t_view = self._expand_to_data(alpha_t, x)
-            alpha_bar_t_view = self._expand_to_data(alpha_bar_t, x)
-
-            pred = model(x, t, cond=cond)
-
-            if objective.prediction_type == "epsilon":
-                eps_pred = pred
-                x0_pred = (
-                    x - torch.sqrt(1.0 - alpha_bar_t_view) * eps_pred
-                ) / torch.sqrt(alpha_bar_t_view)
-
-            elif objective.prediction_type == "x0":
-                x0_pred = pred
-                eps_pred = (
-                    x - torch.sqrt(alpha_bar_t_view) * x0_pred
-                ) / torch.sqrt(1.0 - alpha_bar_t_view)
-
-            else:
+            if not torch.isfinite(x).all():
                 raise ValueError(
-                    f"Unsupported prediction_type: {objective.prediction_type}"
+                    f"Non-finite values encountered in sample at step {step}"
                 )
-            
-            if self.clip_x0:
-                x0_pred = x0_pred.clamp(-1.0, 1.0)
-
-            if t_index == 0:
-                x = x0_pred
-                continue
-
-            alpha_bar_prev = alpha_bar[t_int - 1]
-            alpha_bar_prev_view = self._expand_to_data(alpha_bar_prev, x)
-
-            posterior_variance = (
-                beta_t_view
-                * (1.0 - alpha_bar_prev_view)
-                / (1.0 - alpha_bar_t_view)
-            )
-
-            posterior_mean = (
-                1.0 / torch.sqrt(alpha_bar_t_view)
-            ) * (
-                x 
-                - beta_t_view
-                / torch.sqrt(1.0 - alpha_bar_t_view)
-                * eps_pred
-            )
-
-            noise = torch.rand_like(x)
-
-            x = posterior_mean + torch.sqrt(posterior_variance) * noise
-
         return x
-
 
     @staticmethod
     def _expand_to_data(
