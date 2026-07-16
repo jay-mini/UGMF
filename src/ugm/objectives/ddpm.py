@@ -126,6 +126,58 @@ class DDPMobjective(BaseObjective):
                 "t": t.detach(),
             },
             )
+    
+    def compute_loss_with_fixed_noise(self, model: nn.Module, batch: dict[str, torch.Tensor], time_steps: torch.Tensor | None = None, noise: torch.Tensor | None = None) -> LossOutput:
+        x0 = batch["x"]
+        cond = batch.get("cond", "None")
+
+        batch_size = x0.shape[0]
+        device = x0.device
+
+        if time_steps is None:
+            time_steps = torch.randint(
+                0,
+                self.num_timesteps,
+                (batch_size,),
+                device=x0.device,
+            )
+        else:
+            time_steps = torch.tensor(time_steps, device=device)
+
+        if noise is None:
+            noise = torch.randn_like(x0)
+        else:
+            noise = torch.tensor(noise, device=device)
+
+        xt = self.q_sample(x0, time_steps, noise)
+
+        t = self.normalize_timesteps(time_steps)
+
+        pred = model(xt, t, cond=cond)
+
+        if self.prediction_type == "epsilon":
+            target = noise
+        elif self.prediction_type == "x0":
+            target = x0
+        else:
+            raise ValueError(f"Invalid prediction type: {self.prediction_type}. Must be 'epsilon' or 'x0'.")
+        
+        loss = F.mse_loss(pred, target)
+
+        return LossOutput(
+            loss=loss,
+            metrics={
+                "loss": loss.detach(),
+                "loss_ddpm": loss.detach(),
+            },
+            aux={
+                "t_int": time_steps.detach(),
+                "t": t.detach(),
+            },
+        )
+
+
+
 
     @staticmethod
     def _expand_to_data(
