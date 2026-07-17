@@ -123,6 +123,7 @@ def restore_rng_state(
 def build_checkpoint(
     *,
     model: nn.Module,
+    ema: Any | None,
     objective: nn.Module | None,
     optimizer: Optimizer | None,
     scheduler: Any | None,
@@ -139,6 +140,8 @@ def build_checkpoint(
     ----------
     model:
         Any PyTorch nn.Module.
+
+    ema: Exponential Moving Average.
 
     objective:
         Training objective. It may contain trainable parameters or registered
@@ -176,8 +179,15 @@ def build_checkpoint(
     raw_model = unwrap_model(model)
 
     return {
-        "format_version": 1,
+        "format_version": 2,
         "model": raw_model.state_dict(),
+
+        "ema": (
+            ema.state_dict()
+            if ema is not None
+            else None
+        ),
+
         "objective": (
             objective.state_dict()
             if objective is not None
@@ -241,6 +251,7 @@ def save_checkpoint(
     path: str | Path,
     *,
     model: nn.Module,
+    ema: Any | None,
     objective: nn.Module | None = None,
     optimizer: Optimizer | None = None,
     scheduler: Any | None = None,
@@ -259,6 +270,7 @@ def save_checkpoint(
     """
     checkpoint = build_checkpoint(
         model=model,
+        ema=ema,
         objective=objective,
         optimizer=optimizer,
         scheduler=scheduler,
@@ -310,12 +322,14 @@ def load_checkpoint(
     path: str | Path,
     *,
     model: nn.Module,
+    ema: Any | None,
     objective: nn.Module | None = None,
     optimizer: Optimizer | None = None,
     scheduler: Any | None = None,
     scaler: Any | None = None,
     map_location: str | torch.device | Mapping[str, str] | None = "cpu",
     strict_model: bool = True,
+    strict_ema: bool = True,
     strict_objective: bool = True,
     restore_rng: bool = True,
 ) -> ResumeState:
@@ -395,6 +409,18 @@ def load_checkpoint(
         state=checkpoint["model"],
         strict=strict_model,
     )
+
+    if ema is not None:
+        ema_state = checkpoint.get("ema")
+
+        if ema_state is not None:
+            if isinstance(ema, nn.Module):
+                ema.load_state_dict(
+                    ema_state,
+                    strict=strict_ema,
+                )
+            else:
+                ema.load_state_dict(ema_state)
 
     if objective is not None:
         _load_state_if_available(

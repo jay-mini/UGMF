@@ -49,6 +49,7 @@ class BaseTrainer:
         log_every: int = 100,
         save_every: int = 1000,
         config: dict[str, Any] | None = None,
+        ema: Any | None = None
     ) -> None:
         self.device = torch.device(device)
 
@@ -57,6 +58,7 @@ class BaseTrainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.train_loader = train_loader
+        self.ema = ema
 
         self.output_dir = Path(output_dir)
         self.ckpt_dir = self.output_dir / "checkpoints"
@@ -232,8 +234,14 @@ class BaseTrainer:
                     self.grad_clip,
                 )
 
+            scale_before = self.scaler.get_scale()
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            scale_after = self.scaler.get_scale()
+
+            optimizer_updated = scale_after >= scale_before
 
         else:
             loss.backward()
@@ -245,11 +253,19 @@ class BaseTrainer:
                 )
 
             self.optimizer.step()
+            optimizer_updated = True
 
-        if self.scheduler is not None:
-            self.scheduler.step()
+        if optimizer_updated:
+            self.global_step += 1
 
-        self.global_step += 1
+            if self.ema is not None:
+                self.ema.update(
+                    model=self.model,
+                    global_step = self.global_step,
+                )
+
+            if self.scheduler is not None:
+                self.scheduler.step()
 
         metrics = {
             name: float(value.detach().cpu())
@@ -348,6 +364,7 @@ class BaseTrainer:
         return save_training_checkpoint(
             path=path,
             model=self.model,
+            ema=self.ema,
             objective=self.objective,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
@@ -365,6 +382,7 @@ class BaseTrainer:
         path: str | Path,
         *,
         strict_model: bool = True,
+        strict_ema: bool = True,
         strict_objective: bool = True,
         restore_rng: bool = True,
     ) -> ResumeState:
@@ -375,12 +393,14 @@ class BaseTrainer:
         resume_state = load_training_checkpoint(
             path=path,
             model=self.model,
+            ema=self.ema,
             objective=self.objective,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             scaler=self.scaler,
             map_location=self.device,
             strict_model=strict_model,
+            strict_ema=strict_ema,
             strict_objective=strict_objective,
             restore_rng=restore_rng,
         )
