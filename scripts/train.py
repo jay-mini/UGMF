@@ -20,6 +20,7 @@ from ugm.models.unet import SimpleUNet
 from ugm.objectives.ddpm import DDPMobjective
 from ugm.objectives.flow_matching import FlowMatchingObjective
 from ugm.trainers.base_trainer import BaseTrainer
+from ugm.utils.ema import EMA
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,6 +163,12 @@ def parse_args() -> argparse.Namespace:
         default=2e-2,
     )
 
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+    )
+
     return parser.parse_args()
 
 
@@ -268,14 +275,21 @@ def main() -> None:
         base_channels=args.base_channels,
         time_dim=args.time_dim,
         num_classes=num_classes if args.class_cond else None,
-    )
+    ).to(device)
 
-    objective = build_objective(args)
+    objective = build_objective(args).to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
+    )
+
+    ema = EMA(
+        model=model,
+        decay=0.999,
+        update_after_step=100,
+        update_every=1,
     )
 
     if args.output_dir is None:
@@ -313,7 +327,31 @@ def main() -> None:
         log_every=args.log_every,
         save_every=args.save_every,
         config=config,
+        ema=ema
     )
+
+    if args.resume is not None:
+        resume_path = Path(args.resume)
+
+        if not resume_path.is_file():
+            raise FileNotFoundError(
+                f"Resume checkpoint not found: {resume_path}"
+            )
+        
+        resume_state = trainer.load_checkpoint(
+            resume_path,
+            strict_model=True,
+            strict_ema=True,
+            strict_objective=True,
+            restore_rng=True,
+        )
+
+        print(
+            f"Resume from {resume_state.checkpoint_path}:"
+            f"epoch = {resume_state.epoch}, "
+            f"global_step={resume_state.global_step}"
+        )
+
 
     trainer.train(
         num_epochs=args.num_epochs,
@@ -322,41 +360,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # main()
-
-    args = parse_args()
-    set_seed(args.seed)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    dataset, in_channels, image_size, num_classes = build_dataset(
-        dataset_name=args.dataset,
-        data_dir=args.data_dir,
-    )
-
-    train_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=torch.cuda.is_available(),
-        drop_last=True,
-    )
-
-    model = SimpleUNet(
-        in_channels=in_channels,
-        out_channels=in_channels,
-        base_channels=args.base_channels,
-        time_dim=args.time_dim,
-        num_classes=num_classes if args.class_cond else None,
-    )
-
-    objective = build_objective(args)
-
-    
-
-
-
-
-
-
+    main()

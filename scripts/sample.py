@@ -20,6 +20,7 @@ from ugm.objectives.ddpm import DDPMobjective
 from ugm.objectives.flow_matching import FlowMatchingObjective
 from ugm.samplers.ddpm import DDPMAncestralSampler
 from ugm.samplers.ode import EulerODESampler
+from ugm.utils.ema import EMA
 
 
 def parser_args() -> argparse.Namespace:
@@ -88,6 +89,15 @@ def parser_args() -> argparse.Namespace:
         help=(
             "Optional fixed class label for class-conditional sampling. "
             "If not provided and the model is class-conditional, random labels are used."
+        ),
+    )
+
+    parser.add_argument(
+        "--use_ema",
+        action="store_true",
+        help=(
+            "Use the MEA model stored in the checkpoint "
+            "for sampling."
         ),
     )
 
@@ -263,14 +273,48 @@ def main() -> None:
     model = build_model_from_config(config)
     objective = build_objective_from_config(objective_name, config)
 
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False,)
+
+    model_state = checkpoint.get("model")
+
+    if model_state is None:
+        raise KeyError(
+            f"Checkpoint {ckpt_path} does not contain "
+            "a valid 'model' state."
+        )
 
     model.load_state_dict(checkpoint["model"], strict=True)
-    if "objective" in checkpoint:
-        objective.load_state_dict(checkpoint["objective"], strict=True)
+
+    objective_state = checkpoint.get("objective")
+
+    if objective_state is not None:
+        objective.load_state_dict(objective_state, strict=True, )
 
     model = model.to(device)
     objective = objective.to(device)
+
+    sampling_model = model
+
+    if args.use_ema:
+        ema_state = checkpoint.get("ema")
+
+        if ema_state is None:
+            raise KeyError(
+                "--use_ema was specified, but the checkpoint "
+                "does not contain a valid 'ema' state."
+            )
+        
+        ema = EMA(
+            model=model,
+        )
+
+        ema.load_state_dict(ema_state)
+
+        sampling_model = ema.ema_model
+
+    sampling_model = sampling_model.to(device=device)
+    sampling_model.eval()
+    objective.eval()
 
     shape = infer_sample_shape(
         config=config,
@@ -284,38 +328,46 @@ def main() -> None:
         class_label=args.class_label,
     )
 
-    if objective_name == "ddpm":
-        sampler = DDPMAncestralSampler(
-            clip_x0=args.clip_x0,
-        )
-        samples = sampler.sample(
-            model=model,
-            objective=objective,
-            shape=shape,
-            cond=cond,
-            device=device,
-        )
+    with torch.inference_mode():
+        if objective_name == "ddpm":
+            sampler = DDPMAncestralSampler(
+                clip_x0=args.clip_x0,
+            )
 
-    elif objective_name == "fm":
-        sampler = EulerODESampler(
-            num_steps=args.ode_steps,
-            t_start=0.0,
-            t_end=1.0,
-        )
-        samples = sampler.sample(
-            model=model,
-            shape=shape,
-            cond=cond,
-            device=device,
-        )
+            samples = sampler.sample(
+                model=sampling_model,
+                objective=objective,
+                shape=shape,
+                cond=cond,
+                device=device,
+            )
+        elif objective_name == "fm":
+            sampler = EulerODESampler(
+                num_steps=args.ode_steps,
+                t_start=0.0,
+                t_end=1.0,
+            )
 
-    else:
-        raise RuntimeError("Invalid objective.")
+            samples = sampler.sample(
+                model=sampling_model,
+                shape=shape,
+                cond=cond,
+                device=device,
+            )
+        else:
+            raise RuntimeError(
+                f"Invalid objective: {objective_name}"
+            )
 
     samples = denormalize_to_01(samples)
 
     if args.output is None:
-        output_path = ckpt_path.parent.parent / f"samples_{objective_name}.png"
+        model_type = (
+            "ema"
+            if args.use_ema
+            else "online"
+        )
+        output_path = ckpt_path.parent.parent / f"samples_{objective_name}_{model_type}.png"
     else:
         output_path = Path(args.output)
 
@@ -325,6 +377,11 @@ def main() -> None:
         samples,
         output_path,
         nrow=args.nrow,
+    )
+
+    print(
+        "Sampling model:"
+        f"{'EMA' if args.use_ema else 'online'}"
     )
 
     print(f"Saved samples to: {output_path}")
