@@ -14,7 +14,7 @@ class FlowMatchingObjective(BaseObjective):
 
     x_0 ~ N(0, I)
     x_1 ~ p_data
-    t ~ Uniform(0, 1)
+    t ~ Uniform(t_min, t_max)
 
     Construct the linear path:
     x_t = (1 - t) * x_0 + t * x_1
@@ -52,9 +52,9 @@ class FlowMatchingObjective(BaseObjective):
         device = x1.device
 
         x0 = torch.randn_like(x1)
-        t = torch.rand(batch_size, device=device)
+        t = self.t_min + (self.t_max - self.t_min) * torch.rand(batch_size, device=device)
 
-        t_view = self._expand_to_data(t, x1)
+        t_view = self._expand_to_data(t.to(dtype=x1.dtype), x1)
 
         xt = (1 - t_view) * x0 + t_view * x1
         target_velocity = x1 - x0

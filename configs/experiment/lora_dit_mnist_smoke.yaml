@@ -1,0 +1,26 @@
+# The existing five-step FM DiT-Tiny checkpoint is the frozen backbone.
+base_checkpoint: outputs/fm_mnist_dit_tiny_smoke/checkpoints/last.pt
+base_use_ema: false
+data_dir: data
+output_dir: outputs/lora_dit_mnist_smoke
+
+batch_size: 16
+num_epochs: 1
+max_steps: 3
+lr: 0.001
+weight_decay: 0.0
+num_workers: 0
+mixed_precision: "no"
+grad_clip: 1.0
+log_every: 1
+save_every: 3
+seed: 20260929
+device: auto
+
+lora_rank: 8
+lora_alpha: 16.0
+lora_dropout: 0.05
+lora_target_modules:
+  - blocks.*.mlp.0
+  - blocks.*.mlp.2
+  - final_layer.projection

@@ -104,6 +104,10 @@ def restore_rng_state(
 
     cuda_state = rng_state.get("cuda")
     if cuda_state is not None and torch.cuda.is_available():
+        # A checkpoint loaded with ``map_location="cuda"`` moves these byte
+        # tensors to CUDA too, while PyTorch's RNG restoration API requires
+        # CPU ByteTensors. Normalize both fresh and mapped checkpoints here.
+        cuda_state = [state.cpu() for state in cuda_state]
         saved_device_count = len(cuda_state)
         current_device_count = torch.cuda.device_count()
 
@@ -437,11 +441,20 @@ def load_checkpoint(
             state=checkpoint.get("optimizer"),
         )
 
+    saved_scheduler_state = checkpoint.get("scheduler")
+
+    if scheduler is None and saved_scheduler_state is not None:
+        raise ValueError(
+            "The checkpoint contains scheduler state, but no scheduler "
+            "object was provided. Construct the configured scheduler before "
+            "loading so learning-rate continuity is preserved."
+        )
+
     if scheduler is not None:
         _load_state_if_available(
             object_name="scheduler",
             obj=scheduler,
-            state=checkpoint.get("scheduler"),
+            state=saved_scheduler_state,
         )
 
     if scaler is not None:

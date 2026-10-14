@@ -1,0 +1,27 @@
+objective: rectified_flow
+pairs_dir: outputs/rectified_flow_cifar10/pairs
+init_checkpoint: outputs/fm_cifar10/checkpoints/last.pt
+init_use_ema: true
+output_dir: outputs/rectified_flow_cifar10/finetune
+
+batch_size: 128
+num_epochs: 10
+max_steps: null
+lr: 0.0001
+weight_decay: 0.0001
+scheduler: cosine
+scheduler_total_steps: null
+scheduler_min_lr: 0.0
+num_workers: 4
+mixed_precision: "fp16"
+grad_clip: 1.0
+log_every: 100
+save_every: 1000
+seed: 42
+t_min: 0.0
+t_max: 1.0
+cond_drop_prob: 0.1
+ema_decay: 0.999
+ema_update_after_step: 100
+ema_update_every: 1
+resume: null

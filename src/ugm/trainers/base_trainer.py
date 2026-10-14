@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
 import torch
 from torch import nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
+from ugm.models.conditioning import drop_class_condition
 from ugm.utils.checkpoint import (
     ResumeState,
     load_checkpoint as load_training_checkpoint,
@@ -29,7 +31,9 @@ class BaseTrainer:
     State semantics
     ---------------
     self.epoch:
-        Index of the next epoch to train.
+        Epoch index from which training starts. For a checkpoint saved in the
+        middle of an epoch, this is the current epoch because the DataLoader
+        cursor is not stored.
 
     self.global_step:
         Number of completed optimizer updates.
@@ -49,7 +53,8 @@ class BaseTrainer:
         log_every: int = 100,
         save_every: int = 1000,
         config: dict[str, Any] | None = None,
-        ema: Any | None = None
+        ema: Any | None = None,
+        cond_drop_prob: float = 0.0,
     ) -> None:
         self.device = torch.device(device)
 
@@ -70,10 +75,14 @@ class BaseTrainer:
         self.grad_clip = grad_clip
         self.log_every = int(log_every)
         self.save_every = int(save_every)
+        self.cond_drop_prob = float(cond_drop_prob)
+        if not 0.0 <= self.cond_drop_prob <= 1.0:
+            raise ValueError("cond_drop_prob must be in [0, 1].")
 
         self.config = dict(config) if config is not None else {}
 
-        # self.epoch means the next epoch to train.
+        # Epoch index from which the next train() call starts. A mid-epoch
+        # checkpoint uses the current epoch because batch position is not saved.
         self.epoch = 0
 
         # Number of completed optimizer updates.
@@ -91,6 +100,7 @@ class BaseTrainer:
         )
 
         self.scaler = GradScaler(
+            "cuda",
             enabled=(
                 self.use_amp
                 and self.mixed_precision == "fp16"
@@ -119,12 +129,26 @@ class BaseTrainer:
 
         max_steps:
             Optional upper bound on the total global step.
+
+        Notes
+        -----
+        Mid-epoch checkpoints restore model, optimizer, scheduler, scaler,
+        EMA, RNG, and global_step exactly, but they do not restore the
+        DataLoader iterator or sampler cursor. They restart the saved epoch
+        from its first batch, so exact sample-order continuity is guaranteed
+        only for checkpoints saved at epoch boundaries.
         """
         if num_epochs < self.epoch:
             raise ValueError(
                 f"num_epochs={num_epochs} is smaller than the current "
                 f"resume epoch self.epoch={self.epoch}."
             )
+
+        # This check must happen before fetching a batch or applying an
+        # optimizer update. In particular, resuming a checkpoint already at
+        # max_steps must be a no-op rather than performing one extra step.
+        if max_steps is not None and self.global_step >= max_steps:
+            return
 
         self.model.train()
         self.objective.train()
@@ -135,7 +159,12 @@ class BaseTrainer:
                 desc=f"Epoch {epoch + 1}/{num_epochs}",
             )
 
-            for raw_batch in pbar:
+            try:
+                batches_in_epoch = len(self.train_loader)
+            except TypeError:
+                batches_in_epoch = None
+
+            for batch_index, raw_batch in enumerate(pbar):
                 batch = self._prepare_batch(raw_batch)
 
                 metrics = self._train_step(batch)
@@ -155,6 +184,12 @@ class BaseTrainer:
                         extra={
                             "checkpoint_type": "step",
                             "current_epoch": epoch,
+                            "batches_consumed_in_epoch": batch_index + 1,
+                            "resume_behavior": "restart_current_epoch",
+                            "resume_limitation": (
+                                "DataLoader and sampler cursor state are not "
+                                "saved; mid-epoch resume restarts this epoch."
+                            ),
                         },
                     )
 
@@ -162,9 +197,11 @@ class BaseTrainer:
                     max_steps is not None
                     and self.global_step >= max_steps
                 ):
-                    # Since the epoch is incomplete, resume from the
-                    # beginning of the same epoch.
-                    self.epoch = epoch
+                    epoch_completed = (
+                        batches_in_epoch is not None
+                        and batch_index + 1 >= batches_in_epoch
+                    )
+                    self.epoch = epoch + 1 if epoch_completed else epoch
 
                     self.save_checkpoint(
                         self.ckpt_dir / "last.pt",
@@ -172,6 +209,17 @@ class BaseTrainer:
                         extra={
                             "checkpoint_type": "interrupted",
                             "current_epoch": epoch,
+                            "batches_consumed_in_epoch": batch_index + 1,
+                            "epoch_completed": epoch_completed,
+                            "resume_behavior": (
+                                "next_epoch"
+                                if epoch_completed
+                                else "restart_current_epoch"
+                            ),
+                            "resume_limitation": (
+                                "DataLoader and sampler cursor state are not "
+                                "saved; mid-epoch resume restarts this epoch."
+                            ),
                         },
                     )
                     return
@@ -208,6 +256,7 @@ class BaseTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         with autocast(
+            device_type=self.device.type,
             enabled=self.use_amp,
             dtype=self.amp_dtype,
         ):
@@ -339,6 +388,12 @@ class BaseTrainer:
             else:
                 batch_on_device[key] = value
 
+        if "cond" in batch_on_device:
+            batch_on_device["cond"] = drop_class_condition(
+                batch_on_device["cond"],
+                self.cond_drop_prob,
+            )
+
         return batch_on_device
 
     def save_checkpoint(
@@ -408,10 +463,23 @@ class BaseTrainer:
         self.epoch = resume_state.epoch
         self.global_step = resume_state.global_step
 
-        # Prefer the saved checkpoint configuration. This makes the resumed
-        # run retain the original experiment metadata.
-        if resume_state.config:
-            self.config = resume_state.config
+        # Keep the active configuration. It describes the objects constructed
+        # for this process and may contain an intentionally larger max_steps.
+        # The saved configuration remains available via resume_state so the
+        # caller can validate stateful settings before continuing.
+
+        if (
+            resume_state.extra.get("resume_behavior")
+            == "restart_current_epoch"
+        ):
+            warnings.warn(
+                "This checkpoint was saved mid-epoch. Model, optimizer, "
+                "scheduler, scaler, EMA, RNG, and global_step were restored, "
+                "but the DataLoader cursor was not; the saved epoch will "
+                "restart from its first batch.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         return resume_state
 

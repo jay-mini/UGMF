@@ -1,0 +1,5 @@
+objective: consistency_distillation
+num_time_steps: 20
+target_decay: 0.999
+target_update_every: 1
+teacher_guidance_scale: 1.0

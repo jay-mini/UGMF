@@ -1,0 +1,28 @@
+objective: consistency_distillation
+teacher_checkpoint: outputs/fm_mnist/checkpoints/last.pt
+teacher_use_ema: false
+dataset: mnist
+data_dir: data
+output_dir: outputs/consistency_distill_mnist/short_run
+
+batch_size: 64
+num_epochs: 1
+max_steps: 20
+lr: 0.00001
+weight_decay: 0.0001
+scheduler: cosine
+scheduler_total_steps: null
+scheduler_min_lr: 0.0
+num_workers: 0
+mixed_precision: "no"
+grad_clip: 1.0
+log_every: 5
+save_every: 10
+seed: 42
+
+num_time_steps: 20
+target_decay: 0.999
+target_update_every: 1
+teacher_guidance_scale: 1.0
+cond_drop_prob: 0.0
+resume: null

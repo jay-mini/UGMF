@@ -1,0 +1,45 @@
+objective: fm
+dataset: mnist
+
+data_dir: data
+output_dir: outputs/fm_mnist_dit_tiny_smoke
+
+batch_size: 64
+num_epochs: 1
+max_steps: 5
+
+lr: 0.0002
+weight_decay: 0.0001
+scheduler: cosine
+scheduler_total_steps: null
+scheduler_min_lr: 0.0
+
+model_type: dit_tiny
+dit_patch_size: 4
+dit_hidden_size: 192
+dit_depth: 6
+dit_num_heads: 3
+dit_mlp_ratio: 4.0
+
+# Retained in the unified schema; ignored by DiT.
+base_channels: 64
+time_dim: 256
+
+num_workers: 0
+mixed_precision: "no"
+grad_clip: 1.0
+
+log_every: 1
+save_every: 5
+seed: 42
+class_cond: false
+cond_drop_prob: 0.1
+guidance_scale: 1.0
+
+t_min: 0.0
+t_max: 1.0
+
+ema_decay: 0.999
+ema_update_after_step: 100
+ema_update_every: 1
+resume: null

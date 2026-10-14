@@ -1,0 +1,15 @@
+model_type: unet
+
+# These channels and the spatial size are resolved from the VAE at runtime.
+base_channels: 64
+time_dim: 256
+
+vae_model: stabilityai/sd-vae-ft-mse
+vae_subfolder: null
+vae_revision: 31f26fdeee1355a5c34592e401dd41e45d25a493
+vae_cache_dir: outputs/huggingface_cache
+vae_local_files_only: false
+vae_image_size: 32
+vae_resize_mode: pad
+vae_scaling_factor: null
+sample_posterior: true

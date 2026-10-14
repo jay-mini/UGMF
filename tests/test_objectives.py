@@ -1,7 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
-
+from unittest.mock import patch
 import torch
 from torch import nn
 
@@ -32,6 +32,28 @@ class ObjectiveTests(unittest.TestCase):
         self.assertEqual(output.loss.ndim, 0)
         self.assertTrue(torch.isfinite(output.loss))
         self.assertIn("loss_fm", output.metrics)
+
+    def test_flow_matching_samples_time_inside_configured_interval(self):
+        t_min = 0.2
+        t_max = 0.8
+
+        objective = FlowMatchingObjective(
+            t_min=t_min,
+            t_max=t_max,
+        )
+        model = ZeroVelocityModel()
+
+        batch = {
+            "x": torch.zeros(128, 1, 4, 4),
+            "cond": torch.zeros(128, dtype=torch.long),
+        }
+
+        output = objective.compute_loss(model, batch)
+        sampled_t = output.aux["t"] # type: ignore
+
+        self.assertEqual(sampled_t.shape, (128,))
+        self.assertTrue(torch.all(sampled_t >= t_min))
+        self.assertTrue(torch.all(sampled_t <= t_max))
 
     def test_ddpm_compute_loss_returns_scalar_metrics(self):
         objective = DDPMobjective(num_timesteps=10)

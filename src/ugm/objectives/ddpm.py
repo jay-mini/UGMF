@@ -43,7 +43,7 @@ class DDPMobjective(BaseObjective):
         posterior_variance = (
             betas * (1.0 - alpha_bars_prev) / (1.0 - alpha_bars)
         )
-        poster_variance = torch.clamp(posterior_variance, min=1e-20)
+        posterior_variance = torch.clamp(posterior_variance, min=1e-20)
 
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", alphas)
@@ -129,7 +129,7 @@ class DDPMobjective(BaseObjective):
     
     def compute_loss_with_fixed_noise(self, model: nn.Module, batch: dict[str, torch.Tensor], time_steps: torch.Tensor | None = None, noise: torch.Tensor | None = None) -> LossOutput:
         x0 = batch["x"]
-        cond = batch.get("cond", "None")
+        cond = batch.get("cond", None)
 
         batch_size = x0.shape[0]
         device = x0.device
@@ -142,12 +142,12 @@ class DDPMobjective(BaseObjective):
                 device=x0.device,
             )
         else:
-            time_steps = torch.tensor(time_steps, device=device)
+            time_steps = torch.as_tensor(time_steps, device=device, dtype=torch.long)
 
         if noise is None:
             noise = torch.randn_like(x0)
         else:
-            noise = torch.tensor(noise, device=device)
+            noise = torch.as_tensor(noise, device=device, dtype=x0.dtype)
 
         xt = self.q_sample(x0, time_steps, noise)
 
@@ -176,8 +176,91 @@ class DDPMobjective(BaseObjective):
             },
         )
 
+    def predict_x0(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        model_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Convert model output to x0 prediction.
 
+        Support:
+        - epsilon prediction
+        - x0 prediction
+        """
 
+        if self.prediction_type == "epsilon":
+            x0 = self.predict_x0_from_noise(
+                xt,
+                timesteps,
+                model_output,
+            )
+        elif self.prediction_type == "x0":
+            x0 = model_output
+        else:
+            raise ValueError(
+                f"Unknown prediction type: {self.prediction_type}"
+            )
+        return x0
+
+    def predict_eps_from_x0(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        x0_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Recover epsilon from x0 prediction.
+
+        x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
+        """
+
+        sqrt_alpha_bar_t = extract(
+            self.sqrt_alpha_bars,
+            timesteps,
+            xt.shape,
+        )
+
+        sqrt_one_minus_alpha_bar_t = extract(
+            self.sqrt_one_minus_alpha_bars,
+            timesteps,
+            xt.shape
+        )
+
+        eps = (
+            xt - sqrt_alpha_bar_t * x0_pred
+        ) / sqrt_one_minus_alpha_bar_t.clamp_min(1e-12)
+
+        return eps
+
+    def predict_eps(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        model_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Convert model output to epsilon prediction.
+
+        Support:
+        - epsilong prediction
+        - x0 prediction
+        """
+
+        if self.prediction_type == "epsilon":
+            eps = model_output
+        elif self.prediction_type == "x0":
+            eps = self.predict_eps_from_x0(
+                xt,
+                timesteps,
+                model_output,
+            )
+        else:
+            raise ValueError(
+                f"Unknown prediction type: {self.prediction_type}"
+            )
+        return eps
 
     @staticmethod
     def _expand_to_data(

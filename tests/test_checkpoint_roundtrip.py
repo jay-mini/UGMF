@@ -16,9 +16,12 @@ from torch.utils.data import DataLoader
 from ugm.models.unet import SimpleUNet
 from ugm.objectives.ddpm import DDPMobjective
 from ugm.utils.checkpoint import (
+    capture_rng_state,
     load_checkpoint,
+    restore_rng_state,
     save_checkpoint,
 )
+from ugm.utils.ema import EMA
 
 
 class DictDataset(torch.utils.data.Dataset):
@@ -58,6 +61,23 @@ def seed_everything(seed: int = 42) -> None:
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required to reproduce map_location='cuda'.",
+)
+def test_restore_rng_accepts_cuda_mapped_rng_state() -> None:
+    rng_state = capture_rng_state()
+    expected_cuda_state = [state.clone() for state in rng_state["cuda"]]
+    rng_state["cuda"] = [state.cuda() for state in rng_state["cuda"]]
+
+    restore_rng_state(rng_state)
+
+    restored_cuda_state = torch.cuda.get_rng_state_all()
+    assert len(restored_cuda_state) == len(expected_cuda_state)
+    for actual, expected in zip(restored_cuda_state, expected_cuda_state):
+        assert torch.equal(actual, expected)
 
 
 def clone_state_dict(
@@ -208,11 +228,13 @@ def build_test_data(
 def train_one_fixed_step(
     *,
     model: torch.nn.Module,
+    ema: Any | None=None,
     objective: DDPMobjective,
     optimizer: torch.optim.Optimizer,
     batch: dict[str, torch.Tensor],
     time_steps: torch.Tensor,
     noise: torch.Tensor,
+    global_step: int,
 ) -> float:
     """
     Perform exactly one deterministic optimizer update.
@@ -242,6 +264,11 @@ def train_one_fixed_step(
     )
 
     optimizer.step()
+
+    if ema is not None:
+        ema.update(
+            model, global_step
+        )
 
     return float(loss.detach().cpu())
 
@@ -275,6 +302,7 @@ def test_checkpoint_roundtrip_and_resume_consistency(
         original_model.parameters(),
         lr=1e-3,
     )
+    original_ema = EMA(original_model)
 
     global_step = 0
 
@@ -284,11 +312,13 @@ def test_checkpoint_roundtrip_and_resume_consistency(
     for _ in range(num_steps_before_save):
         train_one_fixed_step(
             model=original_model,
+            ema=original_ema,
             objective=original_objective,
             optimizer=original_optimizer,
             batch=batch,
             time_steps=time_steps,
             noise=noise,
+            global_step=global_step,
         )
         global_step += 1
 
@@ -301,12 +331,16 @@ def test_checkpoint_roundtrip_and_resume_consistency(
     checkpoint_optimizer_state = clone_state_dict(
         original_optimizer.state_dict()
     )
+    checkpoint_ema_state = clone_state_dict(
+        original_ema.state_dict()
+    )
 
     checkpoint_path = tmp_path / "roundtrip.pt"
 
     save_checkpoint(
         checkpoint_path,
         model=original_model,
+        ema=original_ema,
         objective=original_objective,
         optimizer=original_optimizer,
         scheduler=None,
@@ -336,6 +370,7 @@ def test_checkpoint_roundtrip_and_resume_consistency(
         batch=batch,
         time_steps=time_steps,
         noise=noise,
+        global_step=global_step,
     )
 
     reference_global_step = global_step + 1
@@ -361,6 +396,7 @@ def test_checkpoint_roundtrip_and_resume_consistency(
         resumed_model.parameters(),
         lr=1e-3,
     )
+    resumed_ema = EMA(resumed_model)
 
     # ------------------------------------------------------------
     # 5. Load the checkpoint.
@@ -368,6 +404,7 @@ def test_checkpoint_roundtrip_and_resume_consistency(
     resume_state = load_checkpoint(
         checkpoint_path,
         model=resumed_model,
+        ema=resumed_ema,
         objective=resumed_objective,
         optimizer=resumed_optimizer,
         scheduler=None,
@@ -392,6 +429,10 @@ def test_checkpoint_roundtrip_and_resume_consistency(
     assert resume_state.extra == {
         "test_name": "checkpoint_roundtrip",
     }
+    assert_nested_equal(
+        resumed_ema.state_dict(),
+        checkpoint_ema_state,
+    )
 
     # ------------------------------------------------------------
     # 7. Verify model and objective roundtrip.
@@ -437,6 +478,7 @@ def test_checkpoint_roundtrip_and_resume_consistency(
         batch=batch,
         time_steps=time_steps,
         noise=noise,
+        global_step=global_step,
     )
 
     resumed_global_step += 1

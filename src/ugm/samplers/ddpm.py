@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+
+from ugm.models.conditioning import guided_prediction, validate_guidance_scale
+from ugm.samplers.base import BaseSampler, SampleOutput
 from ugm.utils.tensor import extract
 
-class DDPMAncestralSampler:
+
+class DDPMAncestralSampler(BaseSampler):
     """
     DDPM ancestral sampler.
 
@@ -38,6 +42,7 @@ class DDPMAncestralSampler:
         xt: torch.Tensor,
         timesteps: torch.Tensor,
         cond: torch.Tensor | None = None,
+        guidance_scale: float = 1.0,
     ) -> torch.Tensor:
         """
         Perform one reverse step:
@@ -68,7 +73,13 @@ class DDPMAncestralSampler:
 
         model_time = objective.normalize_timesteps(timesteps)
 
-        pred = model(xt, model_time, cond=cond,)
+        pred = guided_prediction(
+            model,
+            xt,
+            model_time,
+            cond,
+            guidance_scale,
+        )
 
         beta_t = extract(objective.betas, timesteps, xt.shape)
         alpha_t = extract(objective.alphas, timesteps, xt.shape)
@@ -93,8 +104,15 @@ class DDPMAncestralSampler:
         
         if self.clip_x0:
             x0_pred = x0_pred.clamp(-1.0, 1.0)
+
+            # Make sure eps_pred is consistent with the clipped x0_pred
+            eps_pred = objective.predict_eps_from_x0(
+                xt=xt,
+                timesteps=timesteps,
+                x0_pred=x0_pred,
+            )
         
-        poseterior_mean = (
+        posterior_mean = (
             1.0 / torch.sqrt(alpha_t)
         ) * (
             xt - beta_t / torch.sqrt(1.0 - alpha_bar_t).clamp_min(1e-12) * eps_pred
@@ -110,7 +128,7 @@ class DDPMAncestralSampler:
             xt.shape[0], *((1,) * (len(xt.shape) - 1))
         )
 
-        x_prev = poseterior_mean + nonzero_mask * torch.sqrt(posterior_variance) * noise
+        x_prev = posterior_mean + nonzero_mask * torch.sqrt(posterior_variance) * noise
 
         return x_prev
 
@@ -118,11 +136,15 @@ class DDPMAncestralSampler:
     def sample(
         self,
         model: nn.Module,
-        objective: nn.Module,
-        shape: tuple[int, ...],
-        cond: torch.Tensor | None=None,
+        objective: nn.Module | None = None,
+        shape: tuple[int, ...] | None = None,
+        cond: torch.Tensor | None = None,
+        guidance_scale: float = 1.0,
         device: torch.device | str = "cuda",
-    ) -> torch.Tensor:
+        initial_noise: torch.Tensor | None = None,
+        num_steps: int | None = None,
+        return_trajectory: bool = False,
+    ) -> SampleOutput:
         """
         Generate samples from a trained DDPM model.
 
@@ -147,28 +169,59 @@ class DDPMAncestralSampler:
 
         """
 
+        if objective is None:
+            raise ValueError("DDPM sampling requires a DDPM objective.")
+        shape = self._require_shape(shape)
+
         device = torch.device(device)
         model.eval()
         objective.to(device)
 
-        x = torch.randn(shape, device=device, )
+        steps = self._resolve_num_steps(num_steps, objective.num_timesteps)
+        guidance_scale = validate_guidance_scale(guidance_scale)
+        if steps != objective.num_timesteps:
+            raise ValueError(
+                "DDPM ancestral sampling requires all training timesteps; "
+                f"got num_steps={steps}, expected {objective.num_timesteps}. "
+                "Use DDIM when a shortened schedule is required."
+            )
 
+        x = self._prepare_initial_noise(shape, device, initial_noise)
         batch_size = shape[0]
+        cond = self._prepare_condition(cond, batch_size, device)
+        states = [x.clone()] if return_trajectory else None
 
-        for step in reversed(range(objective.num_timesteps)):
+        for step in reversed(range(steps)):
             t = torch.full(
                 (batch_size,),
                 fill_value=step,
                 dtype=torch.long,
                 device=device,
             )
-            x = self.p_sample(model, objective, x, t, cond=cond)
+            x = self.p_sample(
+                model,
+                objective,
+                x,
+                t,
+                cond=cond,
+                guidance_scale=guidance_scale,
+            )
 
             if not torch.isfinite(x).all():
-                raise ValueError(
+                raise FloatingPointError(
                     f"Non-finite values encountered in sample at step {step}"
                 )
-        return x
+            if states is not None:
+                states.append(x.clone())
+
+        trajectory_times = torch.arange(
+            steps - 1,
+            -2,
+            -1,
+            device=device,
+            dtype=torch.long,
+        )
+        return self._format_output(x, states, trajectory_times)
 
     @staticmethod
     def _expand_to_data(

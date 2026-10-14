@@ -5,6 +5,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from ugm.models.conditioning import UNCONDITIONAL_CLASS_LABEL
+
 
 def _valid_group_count(num_channels: int, max_groups: int = 8) -> int:
     """
@@ -271,7 +273,33 @@ class SimpleUNet(nn.Module):
         time_emb = self.time_mlp(t)
 
         if self.class_emb is not None and cond is not None:
-            time_emb = time_emb + self.class_emb(cond.long())
+            if cond.ndim != 1 or cond.shape[0] != x.shape[0]:
+                raise ValueError(
+                    "Class conditions must have shape [batch_size]."
+                )
+            if cond.is_floating_point() or cond.is_complex():
+                raise TypeError(
+                    "Class conditions must use an integer tensor dtype."
+                )
+
+            cond = cond.long()
+            invalid = (cond < UNCONDITIONAL_CLASS_LABEL) | (
+                cond >= self.num_classes
+            )
+            if torch.any(invalid):
+                raise ValueError(
+                    "Class labels must be -1 (unconditional) or in "
+                    f"[0, {self.num_classes - 1}]."
+                )
+
+            # Label -1 is a per-example null condition. Its contribution is
+            # exactly zero, making it equivalent to the cond=None branch
+            # without changing the class embedding shape in old checkpoints.
+            null_mask = cond == UNCONDITIONAL_CLASS_LABEL
+            safe_cond = cond.clamp_min(0)
+            class_emb = self.class_emb(safe_cond)
+            class_emb = class_emb.masked_fill(null_mask[:, None], 0.0)
+            time_emb = time_emb + class_emb
 
         h0 = self.input_conv(x)
 
@@ -318,4 +346,3 @@ class SimpleUNet(nn.Module):
             mode = 'nearest',
         )
 
- 

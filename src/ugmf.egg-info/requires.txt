@@ -1,9 +1,0 @@
-torch
-torchvision
-numpy
-tqdm
-pillow
-pyyaml
-
-[dev]
-pytest
