@@ -1,573 +1,169 @@
-# Unified Generative Models
+# UGMF
 
-这是一个统一的生成模型工程仓库，目标是逐步兼容 DDPM、Flow Matching、Rectified Flow、Consistency Distillation、DiT、Latent Diffusion、Classifier-Free Guidance、LoRA 以及 Diffusers 生态。
+用 PyTorch 实现的图像生成实验项目。在同一套训练和采样接口下比较 DDPM、Flow Matching，以及基于 FM teacher 的 reflow 和 consistency distillation。目前实验以 MNIST 为主。
 
-本项目的核心目标不是只实现某一个生成模型，而是构建一个统一、可扩展、工程化的生成模型训练框架，方便后续进行模型训练、采样、微调、蒸馏和评估。
+## 当前进度
 
----
+| 模块 | 已实现和验证的内容 |
+| --- | --- |
+| DDPM / Flow Matching | epsilon/x0 预测、速度场目标、时间区间检查 |
+| 采样 | DDPM、DDIM、Euler、Heun；固定初始噪声、类别条件、可选轨迹 |
+| 训练 | YAML 配置与命令行覆盖、AMP、梯度裁剪、EMA、cosine scheduler、checkpoint 恢复 |
+| 类别条件 | MNIST 类别标签、随机条件丢弃、CFG；引导强度 0/1 的边界测试 |
+| 评估 | 样本导出，torch-fidelity FID/KID/Precision-Recall，重复计时、NFE 和峰值显存 |
+| Rectified Flow | teacher 端点配对、配对数据加载、从已有模型初始化、4/10/20/50 步对比 |
+| Consistency Distillation | 冻结 teacher、student、EMA target、边界参数化、相邻时间损失和 1/2/4 步采样 |
+| DiT-Tiny | patch embedding、二维位置编码、时间/类别条件、adaLN-Zero、输出还原 |
+| Diffusers | UNet2DModel 调用适配、本地/Hub 加载、组件保存与重载 |
+| Latent Diffusion | 冻结预训练 AutoencoderKL、编码与缩放、latent 训练、采样与解码 |
+| LoRA | DiT MLP 和输出层注入、仅更新 A/B、adapter-only 保存与重载 |
 
-## 1. Project Goals
+这些功能的验证深度不同。DDPM/FM 有训练与采样实验；DiT、VAE latent 和 LoRA 主要完成了短训练验证。RF 的第一版小样本对比没有优于 FM；consistency student 的单步结果仍有塌缩。具体结果保留在 [RF 对比记录](docs/rectified_flow_comparison_v1.md) 和 [蒸馏记录](docs/consistency_distillation.md)。
 
-本项目计划支持以下功能：
+CIFAR10 数据加载已接入，但 `configs/experiment/ddpm_cifar10.yaml` 仍是空配置。文本条件、多卡训练和完整预训练生成 pipeline 尚未完成；目录中保留了一些早期占位文件。
 
-- DDPM / DDIM 图像生成
-- Flow Matching 训练与 ODE 采样
-- Rectified Flow 微调
-- Consistency Distillation 少步生成蒸馏
-- DiT / U-Net / Latent U-Net 模型结构
-- Classifier-Free Guidance
-- LoRA 微调
-- Latent Diffusion
-- Diffusers 格式导出
-- FID / KID / Precision-Recall / Speed-Quality 评估
+## 安装与测试
 
----
+需要 Python 3.10 或以上版本。先按机器的 CUDA 环境安装匹配的 PyTorch/torchvision，再安装项目：
 
-## 2. Project Structure
-
-```text
-unified-generative-models/
-├── configs/
-│   ├── experiment/
-│   │   ├── ddpm_mnist.yaml
-│   │   ├── ddpm_cifar10.yaml
-│   │   ├── fm_mnist.yaml
-│   │   ├── rectified_flow_cifar10.yaml
-│   │   └── consistency_distill.yaml
-│   ├── model/
-│   │   ├── unet_small.yaml
-│   │   ├── unet_cifar.yaml
-│   │   ├── dit_tiny.yaml
-│   │   └── latent_unet.yaml
-│   ├── data/
-│   │   ├── mnist.yaml
-│   │   ├── cifar10.yaml
-│   │   └── image_folder.yaml
-│   ├── objective/
-│   │   ├── ddpm.yaml
-│   │   ├── flow_matching.yaml
-│   │   ├── rectified_flow.yaml
-│   │   └── consistency_distillation.yaml
-│   └── train/default.yaml
-│
-├── scripts/
-│   ├── train.py
-│   ├── sample.py
-│   ├── evaluate.py
-│   ├── distill.py
-│   ├── finetune_rf.py
-│   └── export_diffusers.py
-│
-├── src/
-│   └── ugm/
-│       ├── data/
-│       │   ├── build.py
-│       │   ├── image_datasets.py
-│       │   └── transforms.py
-│       │
-│       ├── models/
-│       │   ├── build.py
-│       │   ├── unet.py
-│       │   ├── dit.py
-│       │   ├── time_embedding.py
-│       │   ├── conditioning.py
-│       │   ├── ema.py
-│       │   └── adapters/
-│       │       ├── lora.py
-│       │       └── diffusers_adapter.py
-│       │
-│       ├── objectives/
-│       │   ├── base.py
-│       │   ├── ddpm.py
-│       │   ├── flow_matching.py
-│       │   ├── rectified_flow.py
-│       │   └── consistency.py
-│       │
-│       ├── samplers/
-│       │   ├── base.py
-│       │   ├── ddpm.py
-│       │   ├── ddim.py
-│       │   ├── ode.py
-│       │   ├── rectified_flow.py
-│       │   └── consistency.py
-│       │
-│       ├── trainers/
-│       │   ├── base_trainer.py
-│       │   ├── diffusion_trainer.py
-│       │   ├── distill_trainer.py
-│       │   └── finetune_trainer.py
-│       │
-│       ├── evaluation/
-│       │   ├── fid.py
-│       │   ├── kid.py
-│       │   ├── precision_recall.py
-│       │   └── speed_quality.py
-│       │
-│       ├── utils/
-│       │   ├── config.py
-│       │   ├── checkpoint.py
-│       │   ├── logger.py
-│       │   ├── seed.py
-│       │   ├── distributed.py
-│       │   └── visualization.py
-│       │
-│       └── pipelines/
-│           ├── base_pipeline.py
-│           ├── image_generation.py
-│           ├── latent_diffusion.py
-│           └── diffusers_pipeline.py
-│
-├── tests/
-│   ├── test_objectives.py
-│   ├── test_samplers.py
-│   └── test_training_step.py
-│
-├── notebooks/
-│   ├── 00_toy_data.ipynb
-│   ├── 01_ddpm_mnist.ipynb
-│   └── 02_fm_toy.ipynb
-│
-├── README.md
-├── pyproject.toml
-└── requirements.txt
+```sh
+python -m pip install -e ".[dev,diffusers]"
+python -m pytest -q
 ```
 
----
+`diffusers` extra 同时提供 VAE 和 LoRA adapter 保存所需的依赖。标准生成指标另装：
 
-## 3. Module Design
-
-### 3.1 `configs/`
-
-用于管理实验配置、模型配置、数据配置、目标函数配置和训练配置。
-
-建议采用 Hydra 或 OmegaConf 管理配置，避免在代码中硬编码参数。
-
-主要子目录：
-
-- `configs/experiment/`: 完整实验配置
-- `configs/model/`: 模型结构配置
-- `configs/data/`: 数据集配置
-- `configs/objective/`: 训练目标配置
-- `configs/train/`: 优化器、学习率、batch size、训练轮数等通用训练配置
-
----
-
-### 3.2 `scripts/`
-
-项目入口脚本。
-
-| Script | Function |
-| --- | --- |
-| `train.py` | 统一训练入口 |
-| `sample.py` | 从训练好的模型中采样 |
-| `evaluate.py` | 计算 FID、KID 等指标 |
-| `distill.py` | Consistency Distillation 蒸馏 |
-| `finetune_rf.py` | Rectified Flow 微调 |
-| `export_diffusers.py` | 导出为 Diffusers 兼容格式 |
-
----
-
-### 3.3 `src/ugm/data/`
-
-数据加载与预处理模块。
-
-| File | Function |
-| --- | --- |
-| `build.py` | 根据配置构建 dataset 和 dataloader |
-| `image_datasets.py` | MNIST、CIFAR10、ImageFolder 等数据集封装 |
-| `transforms.py` | 图像预处理、归一化、增强等 |
-
----
-
-### 3.4 `src/ugm/models/`
-
-模型结构模块。
-
-| File | Function |
-| --- | --- |
-| `build.py` | 根据配置构建模型 |
-| `unet.py` | DDPM / FM 常用 U-Net |
-| `dit.py` | Diffusion Transformer |
-| `time_embedding.py` | 时间嵌入模块 |
-| `conditioning.py` | 条件生成、类别条件、文本条件接口 |
-| `ema.py` | Exponential Moving Average |
-| `adapters/lora.py` | LoRA 适配器 |
-| `adapters/diffusers_adapter.py` | Diffusers 格式适配 |
-
----
-
-### 3.5 `src/ugm/objectives/`
-
-训练目标函数模块。
-
-| File | Function |
-| --- | --- |
-| `base.py` | 统一 objective 接口 |
-| `ddpm.py` | DDPM 噪声预测目标 |
-| `flow_matching.py` | Flow Matching 速度场学习目标 |
-| `rectified_flow.py` | Rectified Flow 训练/微调目标 |
-| `consistency.py` | Consistency Training / Consistency Distillation 目标 |
-
-统一接口建议：
-
-```python
-loss = objective.training_loss(model, batch, cond=None)
+```sh
+python -m pip install -e ".[eval]"
 ```
 
-这样不同生成模型只需要替换 objective，而训练器可以尽量复用。
+依赖以 [pyproject.toml](pyproject.toml) 为准，`requirements.txt` 目前为空。首次使用预训练 VAE 或标准指标时会下载对应权重。CUDA AMP 测试需要 GPU；CPU 环境会跳过相关测试。
 
----
+以下命令均在仓库根目录执行，使用单行写法，适用于 PowerShell 和常见 Unix shell。数据和实验产物分别写入 `data/`、`outputs/`，不随源码发布。新克隆的仓库需要先生成命令所依赖的 checkpoint。
 
-### 3.6 `src/ugm/samplers/`
+## 训练和采样
 
-采样器模块。
+### DDPM 与类别条件
 
-| File | Function |
-| --- | --- |
-| `base.py` | 统一 sampler 接口 |
-| `ddpm.py` | DDPM 随机采样 |
-| `ddim.py` | DDIM 确定性采样 |
-| `ode.py` | ODE solver 采样 |
-| `rectified_flow.py` | Rectified Flow 采样 |
-| `consistency.py` | Consistency Model 少步采样 |
-
-统一接口建议：
-
-```python
-samples = sampler.sample(model, shape, cond=None, num_steps=50)
-```
-
----
-
-### 3.7 `src/ugm/trainers/`
-
-训练流程模块。
-
-| File | Function |
-| --- | --- |
-| `base_trainer.py` | 通用训练循环 |
-| `diffusion_trainer.py` | DDPM / FM / RF 通用训练 |
-| `distill_trainer.py` | 蒸馏训练 |
-| `finetune_trainer.py` | 微调训练 |
-
----
-
-### 3.8 `src/ugm/evaluation/`
-
-评估模块。
-
-| File | Function |
-| --- | --- |
-| `fid.py` | FID 计算 |
-| `kid.py` | KID 计算 |
-| `precision_recall.py` | 生成分布覆盖度与精度 |
-| `speed_quality.py` | 采样速度与质量对比 |
-
----
-
-### 3.9 `src/ugm/utils/`
-
-工具函数模块。
-
-| File | Function |
-| --- | --- |
-| `config.py` | 配置读取与合并 |
-| `checkpoint.py` | 模型保存与加载 |
-| `logger.py` | 日志记录 |
-| `seed.py` | 随机种子控制 |
-| `distributed.py` | 多卡训练工具 |
-| `visualization.py` | 图像可视化、采样轨迹可视化 |
-
----
-
-### 3.10 `src/ugm/pipelines/`
-
-高级推理流程模块。
-
-| File | Function |
-| --- | --- |
-| `base_pipeline.py` | 统一 pipeline 接口 |
-| `image_generation.py` | 像素空间图像生成 |
-| `latent_diffusion.py` | Latent Diffusion 推理流程 |
-| `diffusers_pipeline.py` | 与 Hugging Face Diffusers 生态兼容 |
-
----
-
-## 4. Development Roadmap
-
-### Stage 1: Minimal DDPM on MNIST
-
-目标：先跑通最小闭环。
-
-- [ ] 实现 MNIST dataloader
-- [ ] 实现 small U-Net
-- [ ] 实现 DDPM objective
-- [ ] 实现 DDPM sampler
-- [ ] 实现基本训练循环
-- [ ] 保存 checkpoint
-- [ ] 从 checkpoint 采样生成图片
-
-对应实验：
-
-```bash
+```sh
 python scripts/train.py --config configs/experiment/ddpm_mnist.yaml
-python scripts/sample.py --ckpt outputs/ddpm_mnist/checkpoints/latest.pt
+python scripts/sample.py --ckpt outputs/ddpm_mnist/checkpoints/last.pt --sampler ddim --num_steps 50 --use_ema --clip_x0
 ```
 
----
+先检查类别条件与 AMP 流程，可以运行五步配置：
 
-### Stage 2: Flow Matching on MNIST / Toy Data
+```sh
+python scripts/train.py --config configs/experiment/ddpm_mnist_conditional_smoke.yaml
+```
 
-目标：在同一训练框架下兼容 Flow Matching。
+正式类别训练及不同引导强度的网格：
 
-- [ ] 实现 Flow Matching objective
-- [ ] 实现 ODE sampler
-- [ ] 复用 U-Net 或 MLP velocity model
-- [ ] 保存中间轨迹
-- [ ] 可视化 learned velocity field
+```sh
+python scripts/train.py --config configs/experiment/ddpm_mnist_conditional.yaml
+python scripts/sample_class_grid.py --ckpt outputs/ddpm_mnist_conditional/checkpoints/last.pt --output_dir outputs/ddpm_mnist_conditional/class_grid --scales 0 1 3 5 --sampler ddim --num_steps 50 --eta 0 --use_ema
+```
 
-对应实验：
+CFG 采用 `uncond + scale * (cond - uncond)`，因此 scale=0 对应无条件预测，scale=1 对应条件预测。网格的标签传递和效果检查见 [条件采样记录](docs/conditional_sampling_evaluation.md)。
 
-```bash
+### Flow Matching 与 DiT
+
+```sh
 python scripts/train.py --config configs/experiment/fm_mnist.yaml
-python scripts/sample.py --ckpt outputs/fm_mnist/checkpoints/latest.pt
+python scripts/sample.py --ckpt outputs/fm_mnist/checkpoints/last.pt --sampler heun --num_steps 50
 ```
 
----
+同一 trainer 可通过 `model_type` 选择 U-Net、DiT-Tiny 或 Diffusers UNet2DModel。DiT 的五步配置：
 
-### Stage 3: CIFAR10 DDPM / DDIM
-
-目标：扩展到更标准的图像生成任务。
-
-- [ ] 实现 CIFAR10 dataloader
-- [ ] 实现更大的 U-Net
-- [ ] 加入 EMA
-- [ ] 加入 DDIM sampler
-- [ ] 加入 FID / KID 评估
-
-对应实验：
-
-```bash
-python scripts/train.py --config configs/experiment/ddpm_cifar10.yaml
-python scripts/evaluate.py --ckpt outputs/ddpm_cifar10/checkpoints/latest.pt
+```sh
+python scripts/train.py --config configs/experiment/fm_mnist_dit_tiny_smoke.yaml
+python scripts/sample.py --ckpt outputs/fm_mnist_dit_tiny_smoke/checkpoints/last.pt --sampler euler --num_steps 4
 ```
 
----
+FM 使用噪声 t=0、数据 t=1 的方向，Euler/Heun 沿时间增大的方向积分。DDPM/DDIM 使用反向去噪时间表。接口约定和解析 ODE 测试见 [采样说明](docs/sampling.md)。
 
-### Stage 4: Rectified Flow Finetuning
+### 配置与恢复
 
-目标：在已有 diffusion / flow model 基础上做 Rectified Flow 微调。
+`train.py` 的配置优先级为：显式命令行参数 > YAML > 默认值。最终配置保存在运行目录的 `config.json` 和 checkpoint 中。
 
-- [ ] 实现 rectified flow objective
-- [ ] 支持从已有 checkpoint 初始化
-- [ ] 支持 trajectory reflow
-- [ ] 比较 RF 微调前后的采样步数与质量
-
-对应实验：
-
-```bash
-python scripts/finetune_rf.py --config configs/experiment/rectified_flow_cifar10.yaml
+```sh
+python scripts/train.py --config configs/experiment/ddpm_mnist_conditional_smoke.yaml --resume outputs/ddpm_mnist_conditional_smoke/checkpoints/last.pt --max_steps 10
 ```
 
----
+`max_steps` 表示总 optimizer update 数。恢复时若已达到上限，训练不会再多走一步。模型、optimizer、scheduler、scaler、EMA、RNG 和 step 会恢复；epoch 中途保存的 checkpoint 没有 DataLoader 游标，恢复时会从该 epoch 的首批数据重新开始。
 
-### Stage 5: Consistency Distillation
+## Reflow 与蒸馏
 
-目标：实现少步生成蒸馏。
+先运行上面的 FM 训练，得到 teacher checkpoint，再生成配对数据：
 
-- [ ] 加载 teacher model
-- [ ] 实现 student model
-- [ ] 实现 consistency distillation loss
-- [ ] 支持 1-step / 2-step / 4-step 采样
-- [ ] 比较 teacher 与 student 的 speed-quality tradeoff
-
-对应实验：
-
-```bash
-python scripts/distill.py --config configs/experiment/consistency_distill.yaml
+```sh
+python scripts/generate_rf_pairs.py --teacher_ckpt outputs/fm_mnist/checkpoints/last.pt --output_dir outputs/rectified_flow_mnist/pairs --num_samples 60000 --batch_size 128 --shard_size 1024 --solver heun --num_steps 100
+python scripts/finetune_rf.py --config configs/experiment/rectified_flow_mnist.yaml
+python scripts/sample.py --ckpt outputs/rectified_flow_mnist/finetune/checkpoints/last.pt --sampler euler --num_steps 10 --use_ema
 ```
 
----
+配对文件记录噪声、teacher 输出及生成参数。`scripts/compare_reflow.py` 可用固定噪声比较多个步数。第一版实验仅用 64 对样本、两次更新，4/10/20/50 步的指标均未改善，见 [reflow 实现说明](docs/rectified_flow.md) 和 [对比表](docs/rectified_flow_comparison_v1.md)。
 
-### Stage 6: DiT and Latent Diffusion
+Consistency distillation 使用同一个 FM teacher：
 
-目标：扩展到更现代的生成模型结构。
-
-- [ ] 实现 DiT-Tiny
-- [ ] 实现 patch embedding
-- [ ] 实现 latent U-Net
-- [ ] 支持 VAE latent space
-- [ ] 支持 latent diffusion training
-- [ ] 支持 classifier-free guidance
-
----
-
-### Stage 7: LoRA and Diffusers Compatibility
-
-目标：提升工程兼容性。
-
-- [ ] 实现 LoRA adapter
-- [ ] 支持冻结 backbone 只训练 LoRA
-- [ ] 支持导出 Hugging Face Diffusers 格式
-- [ ] 支持从 Diffusers checkpoint 加载权重
-
----
-
-## 5. Current Progress
-
-| Date | Progress | Notes |
-| --- | --- | --- |
-| 2026-07-11 | Created project structure | Initial unified generative model framework |
-| 2026-07-11 | Added README.md | Recorded project goals and roadmap |
-| YYYY-MM-DD |  |  |
-| YYYY-MM-DD |  |  |
-
-
-| Component | Status | Notes |
-|---|---|---|
-| Simple U-Net | Implemented | Forward pass available |
-| DDPM objective | Partial | Training objective implemented |
-| DDPM ancestral sampler | Partial | Requires correctness fixes |
-| Flow Matching objective | Partial | Time-range sampling requires fix |
-| Euler ODE sampler | Partial | Requires numerical tests |
-| Base trainer | Partial | AMP/checkpoint available; EMA missing |
-| DDIM sampler | Not implemented | Planned for Day 5 |
-| EMA | Not implemented | Planned for Day 4 |
-| YAML configuration | Not implemented | Planned for Day 7 |
-| Consistency model | Placeholder | Out of current scope |
-| DiT | Placeholder | Out of current scope |
-
----
-
-## 6. Notes
-
-### 6.1 Core Design Principle
-
-本项目的核心设计原则是：
-
-```text
-Data + Model + Objective + Sampler + Trainer + Evaluation
+```sh
+python scripts/distill.py --config configs/experiment/consistency_distill_mnist_short.yaml
+python scripts/sample_consistency.py --ckpt outputs/consistency_distill_mnist/short_run/checkpoints/last.pt --output_dir outputs/consistency_distill_mnist/short_run/samples_1_2_4 --num_samples 64 --seed 20260927 --consistency_model target
 ```
 
-不同生成模型之间应尽量共享训练框架，只替换关键模块。
+当前方案固定为相邻 FM 时间上的 teacher Euler 转移，边界函数为 `f(x,t)=x+(1-t)F(x,t)`。20 步短训练及 1/2/4 步采样结果见 [蒸馏说明](docs/consistency_distillation.md)。
 
-例如：
+## VAE、LoRA 和 Diffusers 组件
 
-| Model Type | Objective | Sampler |
-| --- | --- | --- |
-| DDPM | noise prediction | DDPM / DDIM sampler |
-| Flow Matching | velocity prediction | ODE sampler |
-| Rectified Flow | straightened velocity prediction | RF sampler |
-| Consistency Model | consistency loss | 1-step / few-step sampler |
+VAE latent 训练：
 
----
-
-### 6.2 Recommended Unified Objective Interface
-
-```python
-class BaseObjective:
-    def training_loss(self, model, batch, cond=None):
-        raise NotImplementedError
-
-    def predict(self, model, x_t, t, cond=None):
-        raise NotImplementedError
+```sh
+python scripts/train_latent.py --config configs/experiment/latent_ddpm_mnist_smoke.yaml
 ```
 
----
+使用固定 revision 的 `stabilityai/sd-vae-ft-mse`。MNIST 从灰度扩展为 RGB，28×28 填充至 32×32，编码为 4×4×4 latent；训练前乘 scaling factor，解码前除回同一个值。已完成一批图像的训练和解码，VAE 无梯度，生成网络参数有更新。该配置只用于检查流程，细节见 [Latent Diffusion](docs/latent_diffusion.md)。
 
-### 6.3 Recommended Unified Sampler Interface
+LoRA 依赖前面生成的 DiT checkpoint：
 
-```python
-class BaseSampler:
-    def sample(self, model, shape, cond=None, num_steps=50):
-        raise NotImplementedError
+```sh
+python scripts/finetune_lora.py --config configs/experiment/lora_dit_mnist_smoke.yaml
 ```
 
----
+默认在每个 DiT block 的两层 MLP 及最终投影注入 rank-8 LoRA，共 13 层；当前不适配融合 QKV 权重。三步微调中可训练参数为 93,824（2.209%），原参数无变化，adapter 重载输出误差为 0。导出文件为 `adapter_config.json` 和 `adapter_model.safetensors`，加载时需要相同的 base 权重。说明见 [LoRA](docs/lora.md)。
 
-### 6.4 Recommended Unified Trainer Interface
+Diffusers 组件往返检查：
 
-```python
-class BaseTrainer:
-    def train(self):
-        raise NotImplementedError
-
-    def train_step(self, batch):
-        raise NotImplementedError
-
-    def save_checkpoint(self):
-        raise NotImplementedError
-
-    def load_checkpoint(self, path):
-        raise NotImplementedError
+```sh
+python scripts/export_diffusers.py --output_dir outputs/diffusers/unet2d_roundtrip --device cpu --seed 20260927
 ```
 
----
+该脚本验证 UNet2DModel 的调用、保存和重载；不负责将自定义 U-Net 权重转换为另一种架构。见 [Diffusers 适配](docs/diffusers_integration.md)。
 
-## 7. Environment Setup
+## 评估
 
-建议使用 Conda 或 venv 创建独立环境。
+下面命令依赖已训练的条件 DDPM checkpoint：
 
-```bash
-conda create -n ugm python=3.10
-conda activate ugm
-pip install -r requirements.txt
+```sh
+python scripts/evaluate.py --ckpt outputs/ddpm_mnist_conditional/checkpoints/last.pt --output_dir outputs/ddpm_mnist_conditional/evaluation_10k --sampler ddim --num_steps 50 --num_samples 10000 --num_reference 10000 --batch_size 64 --guidance_scale 3 --metrics fid kid prc pixel_fd --warmup_runs 2 --repetitions 5 --use_ema --clip_x0
 ```
 
-开发模式安装：
+输出包括 PNG 样本、标签 CSV 和结构化 `results.json`。FID/KID/Precision-Recall 使用 torch-fidelity；`pixel_fd_proxy` 是像素特征上的非标准距离，单独记录，不能当作 FID。
 
-```bash
-pip install -e .
-```
+性能记录包含 warm-up、CUDA 同步、重复计时、NFE 和峰值显存。比较模型时需固定样本数、参考集、初始噪声和权重来源。当前评估入口主要用于像素空间 DDPM/FM/RF checkpoint；latent 解码后的评估和 LoRA adapter 自动装载还需另外接入。详见 [评估协议](docs/evaluation.md)。
 
----
+## 代码位置
 
-## 8. Example Commands
+| 目录 | 内容 |
+| --- | --- |
+| `configs/experiment/` | 可直接传给对应入口的实验配置 |
+| `scripts/` | 训练、微调、采样、评估和组件导出 |
+| `src/ugm/models/` | 模型构建、U-Net、DiT 和 adapter |
+| `src/ugm/objectives/` | DDPM、FM、reflow 和 consistency 损失 |
+| `src/ugm/samplers/` | 离散去噪、ODE 和少步采样 |
+| `src/ugm/trainers/` | 训练循环及 latent/蒸馏扩展 |
+| `src/ugm/evaluation/` | 指标与性能统计 |
+| `tests/` | 数学边界、参数更新、采样和保存/恢复测试 |
+| `docs/` | 实现细节与实验记录 |
 
-### Train DDPM on MNIST
+模型接口为 `model(x, t, cond=None)`，训练目标接口为 `objective.compute_loss(model, batch)`。多数实验共享 BaseTrainer；VAE 编码和蒸馏 target 更新由对应 trainer 扩展处理。
 
-```bash
-python scripts/train.py --config configs/experiment/ddpm_mnist.yaml
-```
-
-### Sample Images
-
-```bash
-python scripts/sample.py --ckpt outputs/ddpm_mnist/checkpoints/latest.pt
-```
-
-### Evaluate Model
-
-```bash
-python scripts/evaluate.py --ckpt outputs/ddpm_cifar10/checkpoints/latest.pt
-```
-
-### Distill Consistency Model
-
-```bash
-python scripts/distill.py --config configs/experiment/consistency_distill.yaml
-```
-
----
-
-## 9. TODO
-
-- [ ] 创建基础项目结构
-- [ ] 编写 `pyproject.toml`
-- [ ] 编写 `requirements.txt`
-- [ ] 实现配置系统
-- [ ] 实现 MNIST dataloader
-- [ ] 实现 U-Net
-- [ ] 实现 DDPM objective
-- [ ] 实现 DDPM sampler
-- [ ] 实现训练器
-- [ ] 实现采样脚本
-- [ ] 添加 Flow Matching objective
-- [ ] 添加 ODE sampler
-- [ ] 添加 Rectified Flow finetune
-- [ ] 添加 Consistency Distillation
-- [ ] 添加 FID / KID 评估
-- [ ] 添加 DiT
-- [ ] 添加 Latent Diffusion
-- [ ] 添加 LoRA
-- [ ] 添加 Diffusers export
+接下来需要补充较长训练下的 RF、蒸馏、latent 和 LoRA 质量对比，完成 CIFAR10 实验配置，并将各分支的采样结果接到统一评估入口。已有短实验的数值只反映对应运行，不能据此判断不同方法的质量上限。

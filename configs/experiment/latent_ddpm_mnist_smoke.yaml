@@ -1,0 +1,55 @@
+objective: ddpm
+dataset: mnist
+data_dir: data
+output_dir: outputs/latent_ddpm_mnist_smoke
+
+# Real pretrained Diffusers AutoencoderKL. MNIST is repeated to RGB and padded
+# from 28x28 to 32x32; the VAE then produces a 4x4x4 latent tensor.
+vae_model: stabilityai/sd-vae-ft-mse
+vae_subfolder: null
+vae_revision: 31f26fdeee1355a5c34592e401dd41e45d25a493
+vae_cache_dir: outputs/huggingface_cache
+vae_local_files_only: false
+vae_image_size: 32
+vae_resize_mode: pad
+vae_scaling_factor: null
+sample_posterior: true
+
+batch_size: 4
+num_epochs: 1
+max_steps: 1
+lr: 0.0002
+weight_decay: 0.0001
+scheduler: none
+scheduler_total_steps: null
+scheduler_min_lr: 0.0
+
+model_type: unet
+base_channels: 16
+time_dim: 64
+num_workers: 0
+mixed_precision: "no"
+grad_clip: 1.0
+log_every: 1
+save_every: 1
+seed: 42
+class_cond: false
+cond_drop_prob: 0.0
+guidance_scale: 1.0
+
+num_timesteps: 10
+beta_start: 0.0001
+beta_end: 0.02
+prediction_type: epsilon
+
+ema_decay: 0.999
+ema_update_after_step: 0
+ema_update_every: 1
+resume: null
+
+sample_batch_size: 4
+sample_num_steps: 5
+sample_sampler: ddim
+sample_eta: 0.0
+use_ema_for_sampling: true
+device: auto

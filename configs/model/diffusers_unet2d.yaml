@@ -1,0 +1,18 @@
+model_type: diffusers_unet2d
+
+# Leave null to create the local component from the architecture below.
+# Set this to a local Diffusers directory or Hub model id to load one.
+diffusers_model_path: null
+diffusers_subfolder: null
+diffusers_local_files_only: false
+
+# UGMF objectives pass t in [0, 1]. Null derives num_timesteps - 1.
+diffusers_timestep_scale: null
+
+diffusers_layers_per_block: 1
+diffusers_block_out_channels: [32, 64]
+diffusers_down_block_types: [DownBlock2D, AttnDownBlock2D]
+diffusers_up_block_types: [AttnUpBlock2D, UpBlock2D]
+diffusers_norm_num_groups: 8
+diffusers_attention_head_dim: 8
+diffusers_add_attention: true

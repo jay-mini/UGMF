@@ -1,0 +1,27 @@
+# Local datasets, weights and experiment output
+/data/
+/outputs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Python build and test artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest*/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# Machine-local configuration
+.vscode/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

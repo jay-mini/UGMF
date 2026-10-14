@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .base import BaseObjective, LossOutput
+from ugm.utils.tensor import extract
 
 class DDPMobjective(BaseObjective):
     """
@@ -35,9 +36,52 @@ class DDPMobjective(BaseObjective):
         alphas = 1.0 - betas
         alpha_bars = torch.cumprod(alphas, dim=0)
 
+        alpha_bars_prev = torch.cat(
+            [torch.ones(1, dtype=alpha_bars.dtype), alpha_bars[:-1]], dim=0,
+        )
+
+        posterior_variance = (
+            betas * (1.0 - alpha_bars_prev) / (1.0 - alpha_bars)
+        )
+        posterior_variance = torch.clamp(posterior_variance, min=1e-20)
+
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", alphas)
         self.register_buffer("alpha_bars", alpha_bars)
+        self.register_buffer("sqrt_alpha_bars", torch.sqrt(alpha_bars))
+        self.register_buffer("sqrt_one_minus_alpha_bars", torch.sqrt(1.0 - alpha_bars))
+        self.register_buffer("posterior_variance", posterior_variance)
+        self.register_buffer("alpha_bars_prev", alpha_bars_prev)
+
+
+    def q_sample(self, x0: torch.Tensor, timesteps: torch.Tensor, noise: torch.Tensor | None = None) -> torch.Tensor:
+        if noise is None:
+            noise = torch.randn_like(x0)
+
+        if noise.shape != x0.shape:
+            raise ValueError(
+                f"Noise shape {noise.shape} must match x0 shape {x0.shape}"
+            )
+        
+        sqrt_alpha_bar_t = extract(self.sqrt_alpha_bars, timesteps, x0.shape)
+        sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alpha_bars, timesteps, x0.shape)
+
+        return (sqrt_alpha_bar_t * x0 + sqrt_one_minus_alpha_bar_t * noise)
+    
+
+    def predict_x0_from_noise(self, xt: torch.Tensor, timesteps: torch.Tensor, noise_pred: torch.Tensor) -> torch.Tensor:
+        sqrt_alpha_bar_t = extract(self.sqrt_alpha_bars, timesteps, xt.shape)
+        sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alpha_bars, timesteps, xt.shape)
+
+        return (
+            xt - sqrt_one_minus_alpha_bar_t * noise_pred
+        ) / sqrt_alpha_bar_t.clamp_min(1e-12)
+    
+
+    def normalize_timesteps(self, timesteps: torch.Tensor) -> torch.Tensor:
+        denominator = max(self.num_timesteps - 1, 1)
+        return timesteps.float() / denominator
+
 
     def compute_loss(self, model: nn.Module, batch: dict[str, torch.Tensor]) -> LossOutput:
         x0 = batch["x"]  # shape: (B, C, H, W)
@@ -46,22 +90,19 @@ class DDPMobjective(BaseObjective):
         batch_size = x0.shape[0]
         device = x0.device
 
-        t_int = torch.randint(
+        timesteps = torch.randint(
             low=0,
             high=self.num_timesteps,
             size=(batch_size,),
             device=device,
+            dtype=torch.long
         )
 
         noise = torch.randn_like(x0)
-
-        alpha_bar_t = self.alpha_bars[t_int]
-        alpha_bar_t = self._expand_to_data(alpha_bar_t, x0)
-
-        xt = alpha_bar_t.sqrt() * x0 + (1 - alpha_bar_t).sqrt() * noise
+        xt = self.q_sample(x0, timesteps, noise)
 
         # Normalize t to [0, 1]
-        t = t_int.float() / (self.num_timesteps - 1)
+        t = self.normalize_timesteps(timesteps)
 
         pred = model(xt, t, cond=cond)
 
@@ -81,10 +122,145 @@ class DDPMobjective(BaseObjective):
                 "loss_ddpm": loss.detach(),
             },
             aux={
-                "t_int": t_int.detach(),
+                "t_int": timesteps.detach(),
                 "t": t.detach(),
             },
             )
+    
+    def compute_loss_with_fixed_noise(self, model: nn.Module, batch: dict[str, torch.Tensor], time_steps: torch.Tensor | None = None, noise: torch.Tensor | None = None) -> LossOutput:
+        x0 = batch["x"]
+        cond = batch.get("cond", None)
+
+        batch_size = x0.shape[0]
+        device = x0.device
+
+        if time_steps is None:
+            time_steps = torch.randint(
+                0,
+                self.num_timesteps,
+                (batch_size,),
+                device=x0.device,
+            )
+        else:
+            time_steps = torch.as_tensor(time_steps, device=device, dtype=torch.long)
+
+        if noise is None:
+            noise = torch.randn_like(x0)
+        else:
+            noise = torch.as_tensor(noise, device=device, dtype=x0.dtype)
+
+        xt = self.q_sample(x0, time_steps, noise)
+
+        t = self.normalize_timesteps(time_steps)
+
+        pred = model(xt, t, cond=cond)
+
+        if self.prediction_type == "epsilon":
+            target = noise
+        elif self.prediction_type == "x0":
+            target = x0
+        else:
+            raise ValueError(f"Invalid prediction type: {self.prediction_type}. Must be 'epsilon' or 'x0'.")
+        
+        loss = F.mse_loss(pred, target)
+
+        return LossOutput(
+            loss=loss,
+            metrics={
+                "loss": loss.detach(),
+                "loss_ddpm": loss.detach(),
+            },
+            aux={
+                "t_int": time_steps.detach(),
+                "t": t.detach(),
+            },
+        )
+
+    def predict_x0(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        model_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Convert model output to x0 prediction.
+
+        Support:
+        - epsilon prediction
+        - x0 prediction
+        """
+
+        if self.prediction_type == "epsilon":
+            x0 = self.predict_x0_from_noise(
+                xt,
+                timesteps,
+                model_output,
+            )
+        elif self.prediction_type == "x0":
+            x0 = model_output
+        else:
+            raise ValueError(
+                f"Unknown prediction type: {self.prediction_type}"
+            )
+        return x0
+
+    def predict_eps_from_x0(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        x0_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Recover epsilon from x0 prediction.
+
+        x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
+        """
+
+        sqrt_alpha_bar_t = extract(
+            self.sqrt_alpha_bars,
+            timesteps,
+            xt.shape,
+        )
+
+        sqrt_one_minus_alpha_bar_t = extract(
+            self.sqrt_one_minus_alpha_bars,
+            timesteps,
+            xt.shape
+        )
+
+        eps = (
+            xt - sqrt_alpha_bar_t * x0_pred
+        ) / sqrt_one_minus_alpha_bar_t.clamp_min(1e-12)
+
+        return eps
+
+    def predict_eps(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        model_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Convert model output to epsilon prediction.
+
+        Support:
+        - epsilong prediction
+        - x0 prediction
+        """
+
+        if self.prediction_type == "epsilon":
+            eps = model_output
+        elif self.prediction_type == "x0":
+            eps = self.predict_eps_from_x0(
+                xt,
+                timesteps,
+                model_output,
+            )
+        else:
+            raise ValueError(
+                f"Unknown prediction type: {self.prediction_type}"
+            )
+        return eps
 
     @staticmethod
     def _expand_to_data(

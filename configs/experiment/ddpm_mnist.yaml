@@ -1,0 +1,38 @@
+objective: ddpm
+dataset: mnist
+
+data_dir: data
+output_dir: outputs/ddpm_mnist
+
+batch_size: 128
+num_epochs: 20
+max_steps: null
+
+lr: 0.0002
+weight_decay: 0.0001
+scheduler: cosine
+scheduler_total_steps: null
+scheduler_min_lr: 0.0
+
+base_channels: 64
+time_dim: 256
+
+num_workers: 4
+mixed_precision: "no"
+grad_clip: 1.0
+
+log_every: 100
+save_every: 1000
+seed: 42
+class_cond: false
+cond_drop_prob: 0.1
+guidance_scale: 1.0
+
+num_timesteps: 1000
+beta_start: 0.0001
+beta_end: 0.02
+prediction_type: epsilon
+
+ema_decay: 0.999
+ema_update_after_step: 100
+ema_update_every: 1
